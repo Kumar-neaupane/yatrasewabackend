@@ -1,60 +1,60 @@
-import express from "express";
-import dotenv from "dotenv";
-import mongoose from "mongoose";
-import authRoute from "./routes/auth.js";
-import roomsRoute from "./routes/rooms.js";
-import usersRoute from "./routes/users.js";
-import hotelRoute from "./routes/hotels.js"; // Ensure correct route import
+import User from "../models/User.js";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import createError from "../utils/error.js"; // Ensure this is imported
 
-dotenv.config(); // Load environment variables
-
-const app = express();
-const port = process.env.PORT || 4000;
-
-// MongoDB Connection Function
-const connect = async () => {
+export const register = async (req, res, next) => {
     try {
-        if (!process.env.MONGO) {
-            throw new Error("MongoDB URI (MONGO) not found in .env file.");
-        }
-        await mongoose.connect(process.env.MONGO, {
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
+        // Hash the password before saving
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(req.body.password, salt);
+
+        // Create new user instance
+        const newUser = new User({
+            username: req.body.username,
+            email: req.body.email,
+            password: hashedPassword, // Store hashed password
         });
-        console.log("✅ Connected to MongoDB");
+
+        // Save user to DB
+        await newUser.save();
+        res.status(201).json({ message: "User has been created successfully." });
+
     } catch (error) {
-        console.error("❌ MongoDB Connection Error:", error);
-        process.exit(1); // Exit process on failure
+        next(error); // Pass error to Express error handler
     }
 };
 
-// MongoDB Event Listeners
-mongoose.connection.on("disconnected", () => console.log("⚠️ MongoDB disconnected"));
-mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
+export const login = async (req, res, next) => {
+    try {
+        // Find user by username
+        const user = await User.findOne({ username: req.body.username });
+        if (!user) return next(createError(404, "User not found."));
 
-// Middleware
-app.use(express.json()); // Enable JSON body parsing
+        // Compare passwords
+        const isPasswordCorrect = await bcrypt.compare(req.body.password, user.password);
+        if (!isPasswordCorrect) return next(createError(400, "Wrong username or password."));
 
-// Routes
-app.use("/api/hotels", hotelRoute);
-app.use("/api/users", usersRoute);
-app.use("/api/rooms", roomsRoute);
-app.use("/api/auth", authRoute);
+        // Generate JWT token
+        const token = jwt.sign(
+            { id: user._id, isAdmin: user.isAdmin },
+            process.env.JWT_SECRET, // Ensure this is correctly set in .env
+            { expiresIn: "7d" } // Token expires in 7 days
+        );
 
-// Global Error Handling Middleware
-app.use((err, req, res, next) => {
-    const errorStatus = err.status || 500;
-    const errorMessage = err.message || "Something went wrong!";
-    return res.status(errorStatus).json({
-        success: false,
-        status: errorStatus,
-        message: errorMessage,
-        stack: process.env.NODE_ENV === "development" ? err.stack : {},
-    });
-});
+        // Exclude password from response
+        const { password, isAdmin, ...otherDetails } = user._doc;
 
-// Start Server
-app.listen(port, async () => {
-    await connect();
-    console.log(`Server is running on http://localhost:${port}`);
-});
+        // Set HTTP-only cookie for security
+        res.cookie("access-token", token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production", // Secure in production
+            sameSite: "strict", // Prevent CSRF attacks
+        });
+
+        res.status(200).json({ ...otherDetails, token });
+
+    } catch (error) {
+        next(error);
+    }
+};
